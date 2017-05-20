@@ -256,26 +256,24 @@ int get_sched_policy(int tid, SchedPolicy *policy)
 
     char grpBuf[32];
 
-    grpBuf[0] = '\0';
-    if (schedboost_enabled()) {
-        if (getCGroupSubsys(tid, "schedtune", grpBuf, sizeof(grpBuf)) < 0) return -1;
-    }
-    if ((grpBuf[0] == '\0') && cpusets_enabled()) {
+    if (cpusets_enabled()) {
         if (getCGroupSubsys(tid, "cpuset", grpBuf, sizeof(grpBuf)) < 0) return -1;
-    }
-    if (grpBuf[0] == '\0') {
-        *policy = SP_FOREGROUND;
-    } else if (!strcmp(grpBuf, "foreground")) {
-        *policy = SP_FOREGROUND;
-    } else if (!strcmp(grpBuf, "system-background")) {
-        *policy = SP_SYSTEM;
-    } else if (!strcmp(grpBuf, "background")) {
-        *policy = SP_BACKGROUND;
-    } else if (!strcmp(grpBuf, "top-app")) {
-        *policy = SP_TOP_APP;
+        if (grpBuf[0] == '\0') {
+            *policy = SP_FOREGROUND;
+        } else if (!strcmp(grpBuf, "foreground")) {
+            *policy = SP_FOREGROUND;
+        } else if (!strcmp(grpBuf, "background")) {
+            *policy = SP_BACKGROUND;
+        } else if (!strcmp(grpBuf, "top-app")) {
+            *policy = SP_TOP_APP;
+        } else {
+            errno = ERANGE;
+            return -1;
+        }
     } else {
-        errno = ERANGE;
-        return -1;
+        // In b/34193533, we removed bg_non_interactive cgroup, so now
+        // all threads are in FOREGROUND cgroup
+        *policy = SP_FOREGROUND;
     }
     return 0;
 }
@@ -336,25 +334,16 @@ int set_cpuset_policy(int tid, SchedPolicy policy)
 static void set_timerslack_ns(int tid, unsigned long long slack) {
     // v4.6+ kernels support the /proc/<tid>/timerslack_ns interface.
     // TODO: once we've backported this, log if the open(2) fails.
-    if (__sys_supports_timerslack) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "/proc/%d/timerslack_ns", tid);
-        int fd = open(buf, O_WRONLY | O_CLOEXEC);
-        if (fd != -1) {
-            int len = snprintf(buf, sizeof(buf), "%llu", slack);
-            if (write(fd, buf, len) != len) {
-                SLOGE("set_timerslack_ns write failed: %s\n", strerror(errno));
-            }
-            close(fd);
-            return;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "/proc/%d/timerslack_ns", tid);
+    int fd = open(buf, O_WRONLY | O_CLOEXEC);
+    if (fd != -1) {
+        int len = snprintf(buf, sizeof(buf), "%llu", slack);
+        if (write(fd, buf, len) != len) {
+            SLOGE("set_timerslack_ns write failed: %s\n", strerror(errno));
         }
-    }
-
-    // TODO: Remove when /proc/<tid>/timerslack_ns interface is backported.
-    if ((tid == 0) || (tid == gettid())) {
-        if (prctl(PR_SET_TIMERSLACK, slack) == -1) {
-            SLOGE("set_timerslack_ns prctl failed: %s\n", strerror(errno));
-        }
+        close(fd);
+        return;
     }
 }
 
@@ -433,7 +422,10 @@ int set_sched_policy(int tid, SchedPolicy policy)
 
     }
 
-    set_timerslack_ns(tid, policy == SP_BACKGROUND ? TIMER_SLACK_BG : TIMER_SLACK_FG);
+    if (__sys_supports_timerslack) {
+        set_timerslack_ns(tid, policy == SP_BACKGROUND ?
+                               TIMER_SLACK_BG : TIMER_SLACK_FG);
+    }
 
     return 0;
 }
